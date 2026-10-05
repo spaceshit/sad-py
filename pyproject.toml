@@ -12,7 +12,7 @@ license = "MIT"
 authors = [{name = "SAD contributors"}]
 keywords = ["static-analysis", "api", "security", "burp", "javascript"]
 classifiers = ["Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Typing :: Typed"]
-dependencies = ["tree-sitter>=0.25,<0.26", "tree-sitter-javascript>=0.23,<0.26", "tree-sitter-typescript>=0.23,<0.24", "defusedxml>=0.7,<0.8", "httpx>=0.28,<0.29"]
+dependencies = ["tree-sitter>=0.25,<0.27", "tree-sitter-javascript>=0.23,<0.26", "tree-sitter-typescript>=0.23,<0.24", "defusedxml>=0.7,<0.8", "httpx>=0.28,<0.29"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.11", "mypy>=1.15", "build>=1.2", "twine>=6", "types-defusedxml", "hypothesis>=6", "jsonschema>=4.23", "pytest-timeout>=2.3"]
