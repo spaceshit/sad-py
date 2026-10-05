@@ -1,0 +1,57 @@
+name: CI
+on: [push, pull_request, workflow_call]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check src tests examples scripts
+      - run: ruff format --check src tests examples scripts
+      - run: mypy src/sad
+      - run: pytest -m 'not stress' --cov=sad --cov-branch --cov-report=term-missing --cov-report=json:artifacts/coverage.json --cov-report=xml:artifacts/coverage.xml --junitxml=artifacts/tests.xml
+      - run: python scripts/reliability_report.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reliability-python-${{ matrix.python }}
+          path: artifacts/
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Install and smoke-test wheel outside checkout
+        shell: bash
+        run: |
+          python -m venv /tmp/sad-wheel
+          /tmp/sad-wheel/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/sad-wheel/bin/sad --version
+          /tmp/sad-wheel/bin/python -c 'from sad import Analyzer; assert Analyzer().analyze_js("fetch(\"/smoke\")").endpoints[0].url == "/smoke"'
+  platform-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e '.[dev]'
+      - run: pytest tests/test_ingest.py tests/test_crawler_cli.py tests/test_collection_boundaries.py tests/test_properties.py
+      - run: python -m build
+      - run: python -m pip install --force-reinstall --no-deps --find-links dist sad-api-discovery
+      - run: sad --version

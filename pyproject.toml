@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sad-api-discovery"
+version = "0.1.0"
+description = "Static, evidence-backed discovery of frontend API operations"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "SAD contributors"}]
+keywords = ["static-analysis", "api", "security", "burp", "javascript"]
+classifiers = ["Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Typing :: Typed"]
+dependencies = ["tree-sitter>=0.25,<0.26", "tree-sitter-javascript>=0.23,<0.26", "tree-sitter-typescript>=0.23,<0.24", "defusedxml>=0.7,<0.8", "httpx>=0.28,<0.29"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.11", "mypy>=1.15", "build>=1.2", "twine>=6", "types-defusedxml", "hypothesis>=6", "jsonschema>=4.23", "pytest-timeout>=2.3"]
+
+[project.scripts]
+sad = "sad.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sad"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+timeout = 30
+markers = ["corpus: independently labeled detection corpus", "stress: larger scheduled fuzz/performance checks"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true

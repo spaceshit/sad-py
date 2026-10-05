@@ -1,0 +1,6 @@
+[
+  {"pattern":"opaque protobuf fileDesc/serviceDesc encoding","reason":"requires schema decoding beyond literal descriptor support"},
+  {"pattern":"computed remote chunk manifest","reason":"no arbitrary loader execution or speculative endpoint fetching"},
+  {"pattern":"runtime decrypted or server supplied route names","reason":"static inputs do not contain the required values"},
+  {"pattern":"proxy traps and decorator driven dependency injection","reason":"requires additional semantics and framework metadata"}
+]

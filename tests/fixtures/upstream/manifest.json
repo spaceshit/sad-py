@@ -1,0 +1,48 @@
+[
+  {
+    "repository": "axios/axios",
+    "commit": "c4303eeb601d3d5914a0f425cc7539616fdc7ea7",
+    "source_path": "README.md",
+    "files": {
+      "axios/README.md": "927321bc7968d47ee3339970628ccd4f78e4738232006b1013f2ace2f16d8af7",
+      "axios/LICENSE": "82761059eaedacb3356803aea8a170d8298609f91b14fc32ee1bfb40d690183c"
+    }
+  },
+  {
+    "repository": "OpenAPITools/openapi-generator",
+    "commit": "4882687e9594f578ffe0cca6207e478fb03e9d2f",
+    "source_path": "samples/client/others/typescript-fetch/self-import-issue/runtime.ts",
+    "files": {
+      "OpenAPITools/runtime.ts": "d15b78f351f567d5de3308d79fe7c927dbe5eb80e42e656295b30244d97e2665",
+      "OpenAPITools/LICENSE": "91a2fcdfc23cbd1188a22cc3b76647bf6eb05c87889e376a19fe478f0398ff02"
+    }
+  },
+  {
+    "repository": "trpc/trpc",
+    "commit": "e5d8436356fe304976d44a64eeb87435bbbb052b",
+    "source_path": "examples/minimal-react/client/src/App.tsx",
+    "files": {
+      "trpc/App.tsx": "0b1f3b47d6768dd4e3bd45c9e05847a92c8c61a2be9aece22ee94029d5cee5a2",
+      "trpc/LICENSE": "e714dd84c8fa242600844b05d317a31003423723178c1f1603dbfad1bc68d906",
+      "trpc/trpc.ts": "71addcc8d006b36a7f75e0da07b35abd8dea2cd07e4d1084177fb6cb464792e0",
+      "trpc/Greeting.tsx": "cbab30fdfef99b55e5ee1d52bd18abc81285e33740ce0cd9ef6ea047480deecb"
+    },
+    "additional_source_paths": [
+      "examples/minimal-react/client/src/utils/trpc.ts",
+      "examples/minimal-react/client/src/Greeting.tsx"
+    ]
+  },
+  {
+    "repository": "connectrpc/examples-es",
+    "commit": "1be3b33cf35512491f2258a063d23f948d0533fe",
+    "source_path": "react/vite/src/App.tsx",
+    "files": {
+      "connectrpc/App.tsx": "6406010475a0816a6890e0c0499cf04873ba7db566eb1615147f6eafcc4e6861",
+      "connectrpc/LICENSE": "445e3398edab2a40d8d5e5c1a1d533af6464fbae8378ecc0caaf2668e9bbea73",
+      "connectrpc/eliza_pb.ts": "f575ea9cc0005030a4733fa10c4443c35b52197caced5cfc33f87d0843daf36c"
+    },
+    "additional_source_paths": [
+      "react/vite/src/gen/connectrpc/eliza/v1/eliza_pb.ts"
+    ]
+  }
+]

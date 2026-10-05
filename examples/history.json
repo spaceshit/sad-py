@@ -1,0 +1,6 @@
+[
+  {"url":"https://example.test/api/v2/users/123","method":"DELETE","status":204},
+  {"url":"https://example.test/app.js","method":"GET","status":200,
+   "response_headers":{"content-type":"application/javascript"},
+   "response_body":"fetch(`/api/v2/users/${id}`, {method:'DELETE'}); fetch('/admin/unseen');"}
+]
