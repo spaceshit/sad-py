@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sad-api-discovery"
+name = "sad-py"
 version = "0.1.0"
 description = "Static, evidence-backed discovery of frontend API operations"
 readme = "README.md"

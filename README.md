@@ -14,7 +14,7 @@ pip install .
 pip install -e '.[dev]'
 ```
 
-The proposed distribution name is `sad-api-discovery` (availability must be confirmed before publishing); the import and executable are `sad`. No release has been published by this repository setup.
+The PyPI distribution name is `sad-py`; the Python import and executable are `sad`. Once published, install it with `pip install sad-py`. No release has been published by this repository setup.
 
 ## Python
 
