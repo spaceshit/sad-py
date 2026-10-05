@@ -22,7 +22,7 @@ jobs:
       - run: mypy src/sad
       - run: pytest -m 'not stress' --cov=sad --cov-branch --cov-report=term-missing --cov-report=json:artifacts/coverage.json --cov-report=xml:artifacts/coverage.xml --junitxml=artifacts/tests.xml
       - run: python scripts/reliability_report.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: reliability-python-${{ matrix.python }}
