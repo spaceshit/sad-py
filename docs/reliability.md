@@ -34,6 +34,44 @@ Pull-request CI runs deterministic offline tests and separate coverage gates on 
 
 The local synthetic benchmark analyzed a 248,889-byte source containing 10,000 distinct fetch calls in a median **0.369 seconds** over three runs, detecting every call. The parser cache recorded one miss and five hits. This measures a simple repeated-call workload, not arbitrary application performance.
 
+## Large-source performance validation (2026-10-07)
+
+The full suite passed **670 tests**, including stress tests, on local Linux/Python 3.14.4. Separate line and branch coverage were **97.74%** and **93.52%**; Ruff checks, formatting and mypy also passed.
+
+Synthetic offline comparisons against the preceding committed implementation used three runs per scenario and a reusable analyzer on local Linux/Python 3.14. Wall-clock medians include analysis and correlation, excluding result serialization:
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| 1,000 static operations plus 1,000 captured requests | 17.170 s | 0.045 s |
+| 5,000 distinct symbolic URLs | 1.540 s | 0.188 s |
+| 5,000 uncalled wrappers with symbolic parameters | 1.647 s | 0.313 s |
+| 5,000 calls to the same endpoint, retaining every location | 1.533 s | 0.146 s |
+| 50,000 distinct fetch calls in an 11.29 MB source | 1.735 s | 1.392 s |
+
+The large-source case includes 10 MB of comment padding and explicitly raises the resource and step limits; it is not a measurement of an equally sized complex vendor bundle. Symbolic cases retain their incomplete-analysis flags. The implementation uses native AST queries for references and bundle candidates, hash indexes for issues and evidence merging, and indexed exact/symbolic correlation. Unknown-branch state copying and abstract interpretation still depend on program structure and remain bounded by existing exploration budgets.
+
+Reproduce with `python scripts/benchmark.py --scenario captured --operations 1000`, or select `symbolic`, `wrappers`, `repeated`, or `fetch`. For the large-source case use `--operations 50000 --padding-bytes 10000000`. `--runs` controls sample count and `--output` chooses the JSON report. The local before/after report is written to `artifacts/performance-optimization.json`.
+
+Regression tests cover source byte eviction, shared concurrent parses, delivery and recovery from concurrent parse failures, unrelated cache operations during a blocked parse, isolated concurrent analyzer results, correlation precedence, Unicode evidence, a large IIFE, a CLI file over 8 MB, and a 50,000-operation source. Timing assertions are avoided so correctness tests do not depend on machine load.
+
+## Complex captured application validation (2026-10-07)
+
+A user-supplied `/tmp/long.xml` capture contained one 563,867-byte JavaScript response, 430 function declarations, 643 arrow functions and 1,650 `if` statements. The capture is not distributed with the repository. Before context/loop optimizations, two default-budget analyses took 14.57 and 15.25 seconds and found no static operations: only the original captured script request survived source-budget exhaustion.
+
+After the changes, three sequential analysis runs per configuration on local Linux/Python 3.14.4 measured:
+
+| Context allowance | Median time | Static-analysis endpoints | Total endpoints |
+| --- | ---: | ---: | ---: |
+| 1,000 steps (default) | 13.28 s | 104 | 105 |
+| 250 steps | 5.62 s | 104 | 105 |
+| 100 steps | 2.10 s | 64 | 65 |
+
+The additional endpoint was correlated with captured traffic (`observed+static`). **Every result remains incomplete.** Equal counts do not imply identical endpoint sets, URL alternatives, headers or bodies. The capture has not been independently labeled for recall or false positives; these counts describe engine output, not verified API coverage. Timings exclude JSON serialization. Each profile used one reusable analyzer and recorded one parser miss and five hits. The local report, including the input digest and samples, is in `artifacts/long-optimization-benchmark.json`; result files are `/tmp/long-analysis-default.json`, `/tmp/long-analysis-fast.json` and `/tmp/long-analysis-faster.json`.
+
+Run `sad import-burp /tmp/long.xml --max-context-steps 250 --format json` for the middle profile. Top-level statements and independent symbolic entry points have separate local work allowances; nested operations still share source/global bounds. Unsupported DOM calls and read-only guards avoid unnecessary snapshots, concrete loops avoid unused snapshots, mutable branches use one snapshot, and symbolic loops have a configurable fixed-point iteration bound. Interrupted contexts emit located issues and retain completed discoveries so independent later statements/functions can be visited.
+
+Validation passed **685 tests**, including stress tests and regressions for nested budget ownership, later bindings/exports after interruption, callbacks whose binding changes between calls, heap aliases, closures, read-only DOM guards and known loop iterations. Line coverage was **97.60%**, branch coverage **93.31%**; Ruff, formatting and mypy passed.
+
 ## Limits and incomplete analysis
 
 SAD retains symbolic endpoints when a proven sink has an unresolved URL, and reports structured issues with a code, location and reason alongside existing string diagnostics. `analysis_incomplete` identifies known missing information, parse failures and exhausted budgets. Absence of an issue does not certify exhaustive discovery.

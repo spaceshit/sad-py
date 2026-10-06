@@ -1,6 +1,6 @@
 """Bounded, context-sensitive abstract interpretation of JS/TS ASTs.
 
-Branch alternatives are explored; loops receive one symbolic iteration. Imported
+Branch alternatives are explored; symbolic loops have bounded fixed-point iterations. Imported
 modules share live environments. No JS runtime, eval, or subprocess is used.
 """
 
@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import json
 import posixpath
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import islice, product
 from typing import Any
 from urllib.parse import urljoin
 
-from tree_sitter import Node
+from tree_sitter import Node, Tree
 
-from sad.models import AnalysisResult, Endpoint, Evidence, Resource
+from sad.models import AnalysisIssue, AnalysisResult, Endpoint, Evidence, Resource
 from sad.protocols import SinkRegistry
 
 from .parser import ASTCache
@@ -44,8 +46,15 @@ FUNCTIONS = {"function_declaration", "function_expression", "arrow_function", "m
 METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 
-def txt(node: Node | None) -> str:
-    return node.text.decode("utf-8", errors="replace") if node and node.text else ""
+def txt(node: Node | None, limit: int | None = None) -> str:
+    raw = node.text if node is not None else None
+    if not raw:
+        return ""
+    if limit is not None:
+        # Four bytes cover one UTF-8 character; preserve the previous character
+        # limit without decoding a multi-megabyte call just for its evidence.
+        return raw[: limit * 4].decode("utf-8", errors="replace")[:limit]
+    return raw.decode("utf-8", errors="replace")
 
 
 def children(node: Node) -> list[Node]:
@@ -56,23 +65,17 @@ def child(node: Node, name: str) -> Node | None:
     return node.child_by_field_name(name)
 
 
-def walk(node: Node) -> list[Node]:
-    result = []
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        result.append(current)
-        stack.extend(reversed(current.named_children))
-    return result
-
-
 @dataclass
 class Module:
     resource: Resource
-    root: Node
+    tree: Tree
     env: dict[str, Any] = field(default_factory=Scope)
     exports: dict[str, Any] = field(default_factory=dict)
     loaded: bool = False
+
+    @property
+    def root(self) -> Node:
+        return self.tree.root_node
 
 
 class Engine:
@@ -83,6 +86,9 @@ class Engine:
         *,
         max_steps: int = 200_000,
         max_depth: int = 20,
+        max_symbolic_loop_iterations: int = 2,
+        max_loop_steps: int = 2000,
+        max_context_steps: int = 1000,
         environment: dict[str, str] | None = None,
         path_mappings: dict[str, str] | None = None,
     ) -> None:
@@ -90,9 +96,20 @@ class Engine:
         self.registry = registry
         self.max_steps = max_steps
         self.max_depth = max_depth
+        if not 1 <= max_symbolic_loop_iterations <= 64 or max_loop_steps < 1:
+            raise ValueError("invalid loop budgets")
+        self.max_symbolic_loop_iterations = max_symbolic_loop_iterations
+        self.max_loop_steps = max_loop_steps
+        if max_context_steps < 1:
+            raise ValueError("max_context_steps must be positive")
+        self.max_context_steps = max_context_steps
+        self.work_budgets: list[WorkBudget] = []
         self.environment = environment or {}
         self.modules: dict[str, Module] = {}
         self.result = AnalysisResult()
+        self._issues: set[AnalysisIssue] = set()
+        self._diagnostics: set[str] = set()
+        self._branch_effects: dict[tuple[str, int], list[Node]] = {}
         self.steps = 0
         self.resource_steps: dict[str, int] = {}
         self.resource_step_limit = max_steps
@@ -112,15 +129,16 @@ class Engine:
     def analyze(self, resources: list[Resource]) -> AnalysisResult:
         for resource in sorted(resources, key=lambda r: r.url):
             try:
-                root = self.cache.parse(resource.content, resource.url).root_node
+                tree = self.cache.parse(resource.content, resource.url)
+                root = tree.root_node
             except ValueError as exc:
                 self.result.diagnostics.append(str(exc))
                 continue
             if root.has_error:
-                self.result.add_issue(
+                self.add_issue(
                     "parse-recovery", f"Recovered syntax errors in {resource.url}", resource.url
                 )
-            self.modules[resource.url] = Module(resource, root)
+            self.modules[resource.url] = Module(resource, tree)
         # Reserve a share for every supplied source. A vendor script must not
         # consume the entire global budget before unrelated application code.
         self.resource_step_limit = max(1, self.max_steps // max(1, len(self.modules)))
@@ -137,15 +155,40 @@ class Engine:
                 index += 1
                 key = (function.module, function.node.start_byte)
                 if key not in self.called:
-                    self.invoke(function, [], function.node)
+                    self.bounded(
+                        function.node,
+                        partial(self.invoke, function, [], function.node),
+                        self.max_context_steps,
+                        "analysis-budget",
+                        source_file=function.module,
+                    )
         except (RecursionError, BudgetExceeded) as exc:
-            self.result.add_issue(
+            self.add_issue(
                 "analysis-budget",
                 f"Analysis truncated: {exc}",
                 exc.source_file if isinstance(exc, BudgetExceeded) else self.module,
             )
         self.result.call_graph = sorted(set(self.result.call_graph))
         return self.result
+
+    def add_issue(
+        self,
+        code: str,
+        reason: str,
+        source_file: str | None = None,
+        source_line: int | None = None,
+        source_column: int | None = None,
+    ) -> None:
+        # Engine owns these lists; use hash indexes rather than scanning all
+        # previous diagnostics for every symbolic URL in a large bundle.
+        issue = AnalysisIssue(code, reason, source_file, source_line, source_column)
+        if issue not in self._issues:
+            self._issues.add(issue)
+            self.result.issues.append(issue)
+        if reason not in self._diagnostics:
+            self._diagnostics.add(reason)
+            self.result.diagnostics.append(reason)
+        self.result.analysis_incomplete = True
 
     def globals(self) -> dict[str, Any]:
         env: dict[str, Any] = {k: Client(v) for k, v in self.registry.globals.items()}
@@ -196,7 +239,7 @@ class Engine:
         resolved = self.resolve(spec)
         if resolved:
             return self.load(resolved)
-        self.result.add_issue(
+        self.add_issue(
             "unresolved-import", f"Unresolved import {spec!r} from {self.module}", self.module
         )
         return Unknown(spec)
@@ -243,6 +286,9 @@ class Engine:
         return module.exports
 
     def tick(self) -> None:
+        for budget in self.work_budgets:
+            if self.steps >= budget.deadline:
+                raise WorkBudgetExceeded(budget)
         if self.resource_steps.get(self.module, 0) >= self.resource_step_limit:
             raise ResourceBudgetExceeded(
                 f"source step budget {self.resource_step_limit} exceeded in {self.module}",
@@ -254,7 +300,7 @@ class Engine:
         self.resource_steps[self.module] = self.resource_steps.get(self.module, 0) + 1
 
     def report_resource_budget(self, exc: ResourceBudgetExceeded) -> None:
-        self.result.add_issue("analysis-budget", f"Analysis truncated: {exc}", exc.source_file)
+        self.add_issue("analysis-budget", f"Analysis truncated: {exc}", exc.source_file)
 
     def function(self, node: Node, env: dict[str, Any]) -> Function:
         fn = Function(node, env, self.module, txt(child(node, "name")) or "<anonymous>")
@@ -263,9 +309,7 @@ class Engine:
 
     def index_bundle(self, module: Module) -> None:
         """Recognize static numeric module tables; no loader code is executed."""
-        for node in walk(module.root):
-            if node.type != "object":
-                continue
+        for node in self.cache.select_nodes(module.tree, "(object) @candidate"):
             pairs = children(node)
             entries: list[tuple[str, Node, Node | None]] = []
             for pair in pairs:
@@ -297,9 +341,7 @@ class Engine:
             return self.bundle_exports[key]
         factory = self.bundle_factories.get(key)
         if factory is None:
-            self.result.add_issue(
-                "unresolved-bundle-module", f"Missing bundle module {module_id}", module
-            )
+            self.add_issue("unresolved-bundle-module", f"Missing bundle module {module_id}", module)
             return Unknown("module-" + module_id)
         exports: dict[str, Any] = {}
         self.bundle_exports[key] = exports
@@ -323,7 +365,7 @@ class Engine:
         if isinstance(result, Alternatives) and any(
             isinstance(v, Unknown) and v.label == "branch-limit" for v in result.values
         ):
-            self.result.add_issue(
+            self.add_issue(
                 "branch-limit",
                 "Value alternatives exceeded 16; retained symbolic remainder",
                 self.module,
@@ -333,7 +375,7 @@ class Engine:
     def products(self, groups: list[list[Any]]) -> list[tuple[Any, ...]]:
         combinations = list(islice(product(*groups), 17))
         if len(combinations) > 16:
-            self.result.add_issue("branch-limit", "Argument combinations exceeded 16", self.module)
+            self.add_issue("branch-limit", "Argument combinations exceeded 16", self.module)
             return [
                 *combinations[:16],
                 tuple(
@@ -346,11 +388,14 @@ class Engine:
         return combinations
 
     def update_scope(self, target: dict[str, Any], source: dict[str, Any]) -> None:
+        if target is source:
+            return
         target.clear()
         target.update(source)
         if isinstance(target, Scope):
+            seen: set[int] = set()
             for name, value in list(target.items()):
-                target[name] = rebase(value, target)
+                target[name] = rebase(value, target, seen)
         if isinstance(target, Scope) and isinstance(source, Scope) and target.parent is not None:
             self.update_scope(target.parent, source.parent or {})
 
@@ -387,9 +432,43 @@ class Engine:
             current = current.parent if isinstance(current, Scope) else None
         return json.dumps(layers, sort_keys=True)
 
+    def bounded(
+        self,
+        node: Node,
+        action: Callable[[], Any],
+        steps: int,
+        code: str,
+        *,
+        source_file: str | None = None,
+    ) -> Any:
+        budget = WorkBudget(self.steps + steps, source_file or self.module)
+        self.work_budgets.append(budget)
+        try:
+            return action()
+        except WorkBudgetExceeded as exc:
+            if exc.budget is not budget:
+                raise
+            label = "Loop" if code == "loop-limit" else "Analysis context"
+            self.add_issue(
+                code,
+                f"{label} exceeded {steps} analysis steps",
+                budget.source_file,
+                node.start_point.row + 1,
+                node.start_point.column + 1,
+            )
+            return Unknown("analysis-budget")
+        finally:
+            self.work_budgets.pop()
+
     def loop(self, node: Node, env: dict[str, Any]) -> Flow:
-        local = Scope(env)
         returns: list[Any] = []
+        flow = self.bounded(
+            node, lambda: self.loop_body(node, env, returns), self.max_loop_steps, "loop-limit"
+        )
+        return flow if isinstance(flow, Flow) else Flow(returns)
+
+    def loop_body(self, node: Node, env: dict[str, Any], returns: list[Any]) -> Flow:
+        local = Scope(env)
         if node.type == "for_in_statement":
             values = self.value(child(node, "right"), local)
             items = (
@@ -405,11 +484,12 @@ class Engine:
                     if flow.breaks:
                         break
             if len(items) > 64:
-                self.result.add_issue("loop-limit", "Loop exceeded 64 known elements", self.module)
+                self.add_issue("loop-limit", "Loop exceeded 64 known elements", self.module)
             return Flow(returns)
         initializer = child(node, "initializer")
         if initializer:
             self.execute(initializer, local)
+        symbolic_iterations = 0
         for iteration in range(64):
             condition_node = child(node, "condition")
             condition = (
@@ -421,7 +501,7 @@ class Engine:
                 condition = True
             if condition is False:
                 return Flow(returns)
-            before = clone(local)
+            before = clone(local) if not isinstance(condition, bool) else None
             flow = self.execute(child(node, "body"), local)
             if isinstance(flow, Flow):
                 returns.extend(flow.returns)
@@ -430,13 +510,24 @@ class Engine:
                 if not flow.continues and flow.returns:
                     return Flow(returns, False)
             self.value(child(node, "increment"), local)
-            if not isinstance(condition, bool):
+            if before is not None:
+                symbolic_iterations += 1
                 merged = join(before, local)
                 if self.state_key(merged) == self.state_key(before):
                     self.update_scope(local, merged)
                     return Flow(returns)
                 self.update_scope(local, merged)
-        self.result.add_issue(
+                if symbolic_iterations >= self.max_symbolic_loop_iterations:
+                    self.add_issue(
+                        "loop-limit",
+                        f"Symbolic loop did not converge within "
+                        f"{self.max_symbolic_loop_iterations} iterations",
+                        self.module,
+                        node.start_point.row + 1,
+                        node.start_point.column + 1,
+                    )
+                    return Flow(returns)
+        self.add_issue(
             "loop-limit", "Loop fixed point did not converge within 64 iterations", self.module
         )
         return Flow(returns)
@@ -522,6 +613,58 @@ class Engine:
                     env,
                 )
 
+    def passive_callee(self, node: Node | None, env: dict[str, Any]) -> tuple[bool, Any]:
+        """Resolve reads without executing calls or charging interpreter steps."""
+        if node is None:
+            return True, Unknown()
+        if node.type in ("identifier", "this"):
+            return True, dereference(env.get(txt(node), Unknown()))
+        if node.type == "parenthesized_expression":
+            parts = children(node)
+            return self.passive_callee(parts[0], env) if parts else (False, None)
+        if node.type == "member_expression":
+            resolved, value = self.passive_callee(child(node, "object"), env)
+            return (
+                (True, self.member(value, txt(child(node, "property"))))
+                if resolved
+                else (False, None)
+            )
+        if node.type == "call_expression":
+            resolved, value = self.passive_callee(child(node, "function"), env)
+            if resolved and self.passive_value(value):
+                return True, Unknown("return")
+        return False, None
+
+    @staticmethod
+    def passive_value(value: Any) -> bool:
+        # These are exactly values for which call() has no modeled heap effects.
+        return not isinstance(
+            value, (Function, Client, Bound, Partial, CallableMember, Alternatives)
+        )
+
+    def readonly(self, node: Node | None, env: dict[str, Any]) -> bool:
+        """Prove a branch cannot mutate bindings/heaps in supported execution."""
+        if node is None:
+            return True
+        key = (self.module, node.id)
+        if key not in self._branch_effects:
+            pattern = """[
+                (assignment_expression) (augmented_assignment_expression)
+                (update_expression) (call_expression) (new_expression)
+                (variable_declarator) (function_declaration) (class_declaration)
+                (import_statement) (export_statement)
+            ] @candidate"""
+            self._branch_effects[key] = self.cache.select_nodes(
+                self.modules[self.module].tree, pattern, node
+            )
+        for effect in self._branch_effects[key]:
+            if effect.type != "call_expression":
+                return False
+            resolved, value = self.passive_callee(child(effect, "function"), env)
+            if not resolved or not self.passive_value(value):
+                return False
+        return True
+
     def execute(self, node: Node | None, env: dict[str, Any]) -> Any:
         if node is None:
             return Unknown()
@@ -547,7 +690,16 @@ class Engine:
                     env[txt(child(target, "name"))] = self.function(target, env)
             returns = []
             for statement in children(node):
-                value = self.execute(statement, env)
+                value = (
+                    self.bounded(
+                        statement,
+                        partial(self.execute, statement, env),
+                        self.max_context_steps,
+                        "analysis-budget",
+                    )
+                    if kind == "program"
+                    else self.execute(statement, env)
+                )
                 if isinstance(value, Flow):
                     returns.extend(value.returns)
                     if not value.continues:
@@ -632,7 +784,9 @@ class Engine:
             condition = self.value(child(node, "condition"), env)
             if isinstance(condition, bool):
                 return self.execute(child(node, "consequence" if condition else "alternative"), env)
-            branches = [clone(env), clone(env)]
+            consequence, alternative = child(node, "consequence"), child(node, "alternative")
+            readonly = self.readonly(consequence, env) and self.readonly(alternative, env)
+            branches = [env, env] if readonly else [clone(env), env]
             flows = [
                 self.execute(child(node, "consequence"), branches[0]),
                 self.execute(child(node, "alternative"), branches[1]),
@@ -641,7 +795,8 @@ class Engine:
             merged = (
                 join(branches[0], branches[1]) if len(continuing) != 1 else branches[continuing[0]]
             )
-            self.update_scope(env, merged)
+            if not readonly:
+                self.update_scope(env, merged)
             return Flow(
                 [v for f in flows if isinstance(f, Flow) for v in f.returns], bool(continuing)
             )
@@ -833,7 +988,7 @@ class Engine:
                     }
                     if operator in operations:
                         return operations[operator]()
-            return Unknown(txt(node)[:80])
+            return Unknown(txt(node, 80))
         if kind == "update_expression":
             argument = child(node, "argument")
             old = self.value(argument, env)
@@ -853,7 +1008,9 @@ class Engine:
             args_node = child(node, "arguments")
             args = [self.value(n, env) for n in children(args_node)] if args_node else []
             if (
-                txt(target) in ("require", "import")
+                target is not None
+                and target.type in ("identifier", "import")
+                and txt(target) in ("require", "import")
                 and args
                 and not isinstance(env.get(txt(target)), (Client, Function, Partial))
             ):
@@ -894,7 +1051,7 @@ class Engine:
         # Traverse unsupported syntax to retain nested direct sinks.
         for part in children(node):
             self.value(part, env)
-        return Unknown(txt(node)[:80] or "dynamic")
+        return Unknown(txt(node, 80) or "dynamic")
 
     def invoke(self, fn: Function, args: list[Any], node: Node) -> Any:
         label = f"{fn.module}:{fn.name}:{fn.node.start_point.row + 1}:{fn.node.start_byte}"
@@ -904,7 +1061,7 @@ class Engine:
         if call_key in self.active_calls or len(self.stack) >= self.max_depth:
             if call_key in self.active_calls:
                 self.recursive_keys.add(call_key)
-            self.result.add_issue("recursion-limit", f"Recursion/depth limit at {label}", fn.module)
+            self.add_issue("recursion-limit", f"Recursion/depth limit at {label}", fn.module)
             return self.summaries.get(call_key, Unknown(fn.name))
         self.active_calls.add(call_key)
         self.called.add((fn.module, fn.node.start_byte))
@@ -944,7 +1101,7 @@ class Engine:
                 ) == serializable(returned):
                     break
             else:
-                self.result.add_issue(
+                self.add_issue(
                     "summary-limit", f"Recursive summary did not converge at {label}", fn.module
                 )
             return returned
@@ -1119,7 +1276,7 @@ class Engine:
             wire_name = descriptor.get("name") if isinstance(descriptor, dict) else None
             protocol, method, url = "connect-web", "POST", wire_name or member or Unknown("method")
             if not wire_name:
-                self.result.add_issue(
+                self.add_issue(
                     "unresolved-wire-method", f"Missing wire descriptor for {member}", self.module
                 )
             body = first if args else None
@@ -1201,7 +1358,7 @@ class Engine:
         ):
             url_text = base.rstrip("/") + "/" + url_text.lstrip("/")
         if "{" in url_text:
-            self.result.add_issue(
+            self.add_issue(
                 "symbolic-url",
                 f"Unresolved URL components: {url_text}",
                 self.module,
@@ -1209,7 +1366,7 @@ class Engine:
                 node.start_point.column + 1,
             )
         if method and method.startswith("{"):
-            self.result.add_issue(
+            self.add_issue(
                 "symbolic-method",
                 "Unresolved request method",
                 self.module,
@@ -1220,7 +1377,7 @@ class Engine:
         column = node.start_point.column + 1
         evidence = [
             Evidence(
-                "ast-call", txt(node)[:1000], resource.source_file or resource.url, line, column
+                "ast-call", txt(node, 1000), resource.source_file or resource.url, line, column
             )
         ]
         if self.stack:
@@ -1262,3 +1419,16 @@ class BudgetExceeded(Exception):
 
 class ResourceBudgetExceeded(BudgetExceeded):
     """One source exhausted its share; independent sources may continue."""
+
+
+@dataclass(frozen=True)
+class WorkBudget:
+    deadline: int
+    source_file: str
+
+
+class WorkBudgetExceeded(Exception):
+    """Local aggregate-work allowance, distinct from source/global limits."""
+
+    def __init__(self, budget: WorkBudget) -> None:
+        self.budget = budget

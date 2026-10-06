@@ -12,7 +12,15 @@ from sad.javascript.engine import Engine
 from sad.javascript.parser import ASTCache
 from sad.javascript.resources import inline_source_map, references, source_map
 from sad.javascript.sourcemaps import SourceMapIndex
-from sad.models import AnalysisResult, Dataset, Endpoint, Evidence, HTTPExchange, Resource
+from sad.models import (
+    AnalysisIssue,
+    AnalysisResult,
+    Dataset,
+    Endpoint,
+    Evidence,
+    HTTPExchange,
+    Resource,
+)
 from sad.normalization import correlate, normalize
 from sad.protocols import SinkRegistry
 
@@ -32,18 +40,31 @@ class Analyzer:
         registry: SinkRegistry | None = None,
         max_steps: int = 200_000,
         max_depth: int = 20,
+        max_symbolic_loop_iterations: int = 2,
+        max_loop_steps: int = 2000,
+        max_context_steps: int = 1000,
         max_resource_bytes: int = 8_000_000,
+        max_cache_bytes: int = 64_000_000,
         path_mappings: dict[str, str] | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
+        if not 1 <= max_symbolic_loop_iterations <= 64:
+            raise ValueError("max_symbolic_loop_iterations must be between 1 and 64")
+        if max_loop_steps < 1:
+            raise ValueError("max_loop_steps must be positive")
+        if max_context_steps < 1:
+            raise ValueError("max_context_steps must be positive")
+        self.max_context_steps = max_context_steps
+        self.max_loop_steps = max_loop_steps
+        self.max_symbolic_loop_iterations = max_symbolic_loop_iterations
         self.path_mappings = path_mappings or {}
         self.base_url = base_url
         self.environment = environment
         self.registry = registry or SinkRegistry()
         self.max_steps = max_steps
         self.max_depth = max_depth
-        self.cache = ASTCache(max_bytes=max_resource_bytes)
+        self.cache = ASTCache(max_bytes=max_resource_bytes, max_cache_bytes=max_cache_bytes)
 
     def analyze_js(self, source: str, *, filename: str = "input.js") -> AnalysisResult:
         return self.analyze_dataset(Dataset(resources=[Resource(filename, source)]))
@@ -203,6 +224,9 @@ class Analyzer:
             self.registry,
             max_steps=self.max_steps,
             max_depth=self.max_depth,
+            max_symbolic_loop_iterations=self.max_symbolic_loop_iterations,
+            max_loop_steps=self.max_loop_steps,
+            max_context_steps=self.max_context_steps,
             environment=self.environment,
             path_mappings=self.path_mappings,
         )
@@ -240,9 +264,11 @@ class Analyzer:
             except ValueError as exc:
                 result.diagnostics.append(f"Invalid endpoint {endpoint.url!r}: {exc}")
         result.endpoints = correlate(valid)
-        for diagnostic in list(result.diagnostics):
-            if not any(issue.reason == diagnostic for issue in result.issues):
-                result.add_issue("input-incomplete", diagnostic)
+        issue_reasons = {issue.reason for issue in result.issues}
+        for diagnostic in dict.fromkeys(result.diagnostics):
+            if diagnostic not in issue_reasons:
+                result.issues.append(AnalysisIssue("input-incomplete", diagnostic))
+                result.analysis_incomplete = True
         result.diagnostics = sorted(set(result.diagnostics))
         result.issues.sort(
             key=lambda issue: (

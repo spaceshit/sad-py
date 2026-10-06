@@ -56,6 +56,24 @@ sad crawl https://www.google.com/ --depth 2 --max-pages 30 --max-steps 2000000 -
 
 The global step budget is divided among supplied JavaScript sources so one expensive script cannot prevent independent sources from being analyzed. When a source exhausts its share, completed discoveries and export bindings are retained, a located `analysis-budget` issue is emitted and other sources continue. Raising the budget allows more exploration, but does not guarantee completeness or remove other limits.
 
+Expensive top-level statements and uncalled symbolic entry points each have a local allowance (`--max-context-steps`, default: 1,000), so one UI helper cannot consume the source budget before independent API functions are visited. Loops additionally have an aggregate allowance (`--max-loop-steps`, default: 2,000) covering nested calls, and unknown loop conditions use at most two fixed-point iterations (`--max-symbolic-loop-iterations`, range: 1–64). All global/source limits still apply. A local interruption keeps completed discoveries, emits a located issue and marks the result incomplete.
+
+For a quicker inventory of a complex captured application:
+
+```sh
+sad import-burp history.xml --max-context-steps 250 --format json
+```
+
+Smaller allowances trade exploration detail for speed; they can change URL alternatives, headers and discovered endpoints. For deeper exploration, raise the local allowances along with `--max-steps`, for example `--max-context-steps 10000 --max-loop-steps 10000 --max-symbolic-loop-iterations 64 --max-steps 2000000`.
+
+Large files can use a higher per-resource byte limit (default: 8,000,000 bytes):
+
+```sh
+sad analyze-js app.js --max-resource-bytes 32000000 --max-steps 2000000 --format json
+```
+
+For repeated requests, reuse an `Analyzer(max_resource_bytes=32_000_000, max_cache_bytes=64_000_000)` instead of creating one per request. Each analysis has isolated interpreter state. The shared AST cache coalesces concurrent parses of identical content and evicts by both entry count and total cached source bytes. Native AST memory is additional to this byte budget. Increasing file size limits does not increase the step budget automatically.
+
 `Argument combinations exceeded 16` reports widening of too many possible argument combinations. SAD keeps explored alternatives and a symbolic remainder and sets `analysis_incomplete=true`; it does not claim that every concrete combination was analyzed. Loops, recursion and missing inputs can also cause partial results. The CLI explicitly marks incomplete output, and `--strict` exits with status 1 when diagnostics occur.
 
 `high` confidence applies to an individual detected operation, not to coverage of the whole application. An HTML form can produce an endpoint even if JavaScript analysis is incomplete; inspect its `evidence` in JSON to distinguish form declarations from JavaScript sinks.

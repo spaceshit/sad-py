@@ -29,6 +29,30 @@ def main(argv: list[str] | None = None) -> int:
             help="global static-analysis step budget, shared fairly among supplied sources",
         )
         sub.add_argument(
+            "--max-context-steps",
+            type=int,
+            default=1000,
+            help="maximum steps per top-level statement or symbolic entry point",
+        )
+        sub.add_argument(
+            "--max-loop-steps",
+            type=int,
+            default=2000,
+            help="maximum analysis steps per loop, including nested calls",
+        )
+        sub.add_argument(
+            "--max-symbolic-loop-iterations",
+            type=int,
+            default=2,
+            help="maximum fixed-point iterations for loops with unknown conditions (1-64)",
+        )
+        sub.add_argument(
+            "--max-resource-bytes",
+            type=int,
+            default=8_000_000,
+            help="maximum bytes per source resource",
+        )
+        sub.add_argument(
             "--strict", action="store_true", help="exit 1 if any diagnostic is emitted"
         )
         if command == "crawl":
@@ -39,7 +63,14 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--exclude", action="append", default=[])
     args = parser.parse_args(argv)
     try:
-        analyzer = Analyzer(base_url=args.base_url, max_steps=args.max_steps)
+        analyzer = Analyzer(
+            base_url=args.base_url,
+            max_steps=args.max_steps,
+            max_loop_steps=args.max_loop_steps,
+            max_context_steps=args.max_context_steps,
+            max_symbolic_loop_iterations=args.max_symbolic_loop_iterations,
+            max_resource_bytes=args.max_resource_bytes,
+        )
         if args.command == "crawl":
             result = analyzer.analyze_urls(
                 args.input,
@@ -47,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
                     depth=args.depth,
                     max_pages=args.max_pages,
                     max_resources=args.max_resources,
+                    max_bytes=args.max_resource_bytes,
                     allowed_origins=tuple(args.allow_origin),
                     exclusions=tuple(args.exclude),
                 ),
@@ -55,7 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             result = analyzer.analyze_dataset(BurpImporter.load(args.input, base_url=args.base_url))
         elif args.command == "analyze-js":
             result = analyzer.analyze_js(
-                read_bounded(args.input).decode("utf-8", errors="replace"), filename=args.input
+                read_bounded(args.input, args.max_resource_bytes).decode("utf-8", errors="replace"),
+                filename=args.input,
             )
         else:
             result = analyzer.analyze_path(args.input)

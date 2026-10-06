@@ -173,9 +173,9 @@ def clone(value: Any, memo: dict[int, Any] | None = None) -> Any:
     if isinstance(
         value, (Client, Bound, Alternatives, LiveBinding, Partial, CallableMember, PromiseValue)
     ):
-        from copy import copy
-
-        copied_value = copy(value)
+        # All abstract-value fields are copied below; a shallow copy first
+        # only adds reconstruction overhead on every heap snapshot.
+        copied_value = object.__new__(type(value))
         memo[id(value)] = copied_value
         for key, item in vars(value).items():
             setattr(copied_value, key, clone(item, memo))

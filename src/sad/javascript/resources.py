@@ -9,21 +9,34 @@ from urllib.parse import urljoin
 
 from sad.models import Resource
 
-from .engine import child, children, txt, walk
+from .engine import child, children, txt
 from .parser import ASTCache
 from .sourcemaps import sections
 
 
 def references(resource: Resource, cache: ASTCache) -> list[str]:
-    root = cache.parse(resource.content, resource.url).root_node
+    tree = cache.parse(resource.content, resource.url)
     found = []
-    for node in walk(root):
+    pattern = """
+        (import_statement) @candidate
+        (export_statement source: (string)) @candidate
+        (call_expression function: (identifier) @_callee
+            (#eq? @_callee "require")) @candidate
+        (call_expression function: (import)) @candidate
+        (comment) @candidate
+    """
+    for node in cache.select_nodes(tree, pattern):
         source = child(node, "source")
         if node.type in ("import_statement", "export_statement") and source:
             spec = txt(source)[1:-1]
             if spec.startswith((".", "/", "http")):
                 found.append(urljoin(resource.url, spec))
-        if node.type == "call_expression" and txt(child(node, "function")) in ("import", "require"):
+        function = child(node, "function") if node.type == "call_expression" else None
+        if (
+            function is not None
+            and function.type in ("identifier", "import")
+            and txt(function) in ("import", "require")
+        ):
             args = child(node, "arguments")
             if args and children(args) and children(args)[0].type == "string":
                 spec = txt(children(args)[0])[1:-1]

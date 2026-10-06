@@ -22,6 +22,16 @@ assert any(e.url.endswith("/not-in-history") for e in result.endpoints)
 
 An HTTPExchange represents an observed request and optional response. Supplying only a response should use `Resource` (or `RawHTTPImporter.from_text(..., base_url=original_url)`), so SAD does not invent a GET observation. HTTPExchange headers should have lowercase keys. `Dataset.resources` can contain local or URL-named captured HTML, JavaScript, TypeScript, or source maps. A source file is never fetched merely because it appears in a dataset. URL batches are explicit `analyze_urls([...])` calls; pass stripped nonempty lines from a URL-list file.
 
+## Repeated and concurrent analysis
+
+Reuse one `Analyzer` to keep parsed ASTs across requests. Calls create independent engines and results; avoid changing its configuration or registry while calls are running. Concurrent requests for the same source share an in-flight parse. Cache hits and unrelated parses do not acquire a lock held by a long parse. This does not promise parallel CPU execution in Python; use a bounded pool of worker processes when CPU throughput needs to scale across cores, with one reusable analyzer per worker.
+
+`max_resource_bytes` controls the input size limit (8 MB by default); `max_cache_bytes` bounds the sum of source bytes represented by retained ASTs (64 MB by default), alongside the 128-entry limit. This is not a bound on native AST memory or on in-flight requests. Oversized cache entries can still be analyzed within the resource limit and are not retained. Step, recursion and branch budgets remain independently enforced.
+
+For large applications with expensive UI functions, `Analyzer(max_context_steps=250)` limits each top-level statement and independent symbolic entry point to 250 steps. The default is 1,000. `max_loop_steps` defaults to 2,000 aggregate steps per loop, and `max_symbolic_loop_iterations` defaults to 2; known loops retain their existing 64-iteration bound. Local allowances count nested calls and imports, and the earliest active allowance wins. Interrupted contexts retain completed discoveries and bindings and produce located `analysis-budget` or `loop-limit` issues. Later independent contexts can proceed while source/global budget remains. Smaller allowances can reduce coverage and change symbolic alternatives; raising only `max_steps` does not override these local limits.
+
+Read-only branch paths avoid heap snapshots when the abstract interpreter can prove they have no modeled mutations. Other paths use one snapshot, with closure and alias rebasing at joins. Concrete loop iterations avoid unused snapshots, and abstract-value cloning avoids redundant shallow-copy reconstruction.
+
 ## Formats
 
 Burp XML reads `<items><item>` records, URL/method fields and optional base64 request/response messages. HAR reads `log.entries` and base64 response content. Binary Burp project archives are not supported. Export selected traffic as XML or use an extension to normalize it.

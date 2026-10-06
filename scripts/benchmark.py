@@ -8,24 +8,58 @@ from pathlib import Path
 from statistics import median
 from time import perf_counter
 
-from sad import Analyzer
+from sad import Analyzer, Dataset, HTTPExchange, Resource
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--operations", type=int, default=5000)
     parser.add_argument("--output", type=Path, default=Path("artifacts/performance.json"))
+    parser.add_argument(
+        "--scenario",
+        choices=("fetch", "symbolic", "wrappers", "captured", "repeated"),
+        default="fetch",
+    )
+    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--padding-bytes", type=int, default=0)
     args = parser.parse_args()
+    if args.operations < 1 or args.runs < 1 or args.padding_bytes < 0:
+        parser.error("operations and runs must be positive; padding must be nonnegative")
     source = ";".join(f'fetch("/benchmark/{index}")' for index in range(args.operations))
-    analyzer = Analyzer(max_steps=max(200_000, args.operations * 30))
+    if args.scenario == "symbolic":
+        source = ";".join(
+            f"fetch(`/benchmark/{index}/${{id}}`)" for index in range(args.operations)
+        )
+    elif args.scenario == "wrappers":
+        source = ";".join(
+            f"function f{index}(id){{fetch(`/benchmark/{index}/${{id}}`)}}"
+            for index in range(args.operations)
+        )
+    if args.scenario == "repeated":
+        source = ";".join('fetch("/benchmark/same")' for _ in range(args.operations))
+    if args.padding_bytes:
+        source += "\n/*" + "x" * args.padding_bytes + "*/"
+    dataset = Dataset(resources=[Resource("input.js", source)])
+    if args.scenario == "captured":
+        dataset.exchanges = [HTTPExchange(f"/benchmark/{i}") for i in range(args.operations)]
+    analyzer = Analyzer(
+        max_steps=max(200_000, args.operations * 100),
+        max_resource_bytes=max(8_000_000, len(source.encode())),
+    )
     samples = []
-    for _ in range(3):
+    for _ in range(args.runs):
         start = perf_counter()
-        result = analyzer.analyze_js(source)
+        result = analyzer.analyze_dataset(dataset)
         samples.append(perf_counter() - start)
-        if len(result.endpoints) != args.operations or result.analysis_incomplete:
+        expected_partial = args.scenario in ("symbolic", "wrappers")
+        expected_endpoints = 1 if args.scenario == "repeated" else args.operations
+        if (
+            len(result.endpoints) != expected_endpoints
+            or result.analysis_incomplete != expected_partial
+        ):
             raise AssertionError("benchmark missed operations or exhausted its budget")
     report = {
+        "scenario": args.scenario,
         "operations": args.operations,
         "seconds": samples,
         "median_seconds": median(samples),
